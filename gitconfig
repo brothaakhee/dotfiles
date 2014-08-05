@@ -1,0 +1,46 @@
+[user]
+    name = Hammad Hai 
+    email = shakirsahab@gmail.com
+[github]
+    user = brothaakhee 
+[core]
+    editor = vim
+    excludesfile = ~/.gitignore_global
+[merge]
+    tool = vimdiff
+[color]
+    status = auto
+    branch = auto
+    interactive = auto
+    diff = auto
+    grep = auto
+    ui = auto
+[diff]
+    tool = vimdiff
+[difftool]
+    prompt = false
+[log]
+    decorate = full
+[alias]
+    glog = log --graph
+    st = status
+    ci = commit -a
+    up = checkout
+    co = checkout
+    sum = status
+    di = diff
+    bo = branch
+    bookmarks = branch
+    branches = branch
+    o = log --graph @{u}..HEAD
+    out = log --graph @{u}..HEAD
+    outgoing = log --graph @{u}..HEAD
+    in = log --graph HEAD..@{u}
+    incoming = log --graph HEAD..@{u}
+    vimdiff = difftool --tool=vimdiff --no-prompt
+    rpo = remote prune origin
+    unstage = reset HEAD --
+    last = log -1 HEAD
+    uncommit = reset --soft 'HEAD^'
+[push]
+    default = current
