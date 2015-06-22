@@ -1,0 +1,1163 @@
+import re
+import uuid
+from json import dumps
+from hashlib import sha1
+from random import random
+from datetime import datetime, timedelta
+from django.conf import settings
+from django.core.cache import cache as charmsavings_cache
+from django.db.models import Q
+from django.shortcuts import render
+from django.views.decorators.http import require_http_methods
+from django.http import HttpResponse
+from django.core.urlresolvers import reverse
+from django.views.decorators.cache import never_cache
+from django.utils.cache import patch_cache_control
+from math import ceil
+from monetization.apps.deals.api import get_deals
+from monetization.apps.keysets.models import Client, KeySet, KeySetBrokerIdentifier
+from monetization.apps.charmSavingsApplication import get_current_version
+from monetization.apps.charmSavingsApplication.models import CharmSavingsPartner, CharmSavingsPartnerTheme, CharmSavingsUser, MatchLogicCode, SeekSku
+from monetization.apps.charmSavingsApplication.cache import (cache_coupon_buddy_user_setting,
+                                                             cache_keyset,
+                                                             cache_user_blacklist,
+                                                             create_cacheable_charmsavings_js,
+                                                             get_cached_charmsavings_partner_theme,
+                                                             get_cached_widgets,
+                                                             get_cached_user_settings,
+                                                             get_bitehunter_sites,
+                                                             bitehunter_deals,
+                                                             cache_merchant,
+                                                             extract_domain)
+from monetization.apps.widgets.models import Broker
+from monetization.apps.keysetgroups.cache import check_keysetgroup_blacklist, check_cs_whitelist
+############ Coupon Buddy Dependencies #############
+from monetization.apps.couponBuddyToolbars.models import CouponBuddyUser, CouponBuddyUserNote, CouponBuddyUserSettings, CouponBuddyUserDisabledSite
+from monetization.apps.couponBuddyToolbars.views import couponbuddy_user_management
+from monetization.apps.pythonJSBloomFilter import BloomFilter
+from urlparse import urlparse, urlunparse
+from urllib import urlencode
+
+
+USER_BUFFER_DURATION = timedelta(hours=6)
+################################################################################
+#                           Global Variables                                   #
+################################################################################
+class CharmSavingsViewsException(Exception):
+    pass
+
+
+################################################################################
+#                           Global Functions                                   #
+################################################################################
+def get_conduit_client():
+    """Returns the main conduit keyset"""
+    try:
+        client = Client.objects.get(id=1419)
+    except Client.DoesNotExist:
+        raise CharmSavingsViewsException("Conduit client does not exist, or isnt id:1419")
+    return client
+
+
+def get_cs_client():
+    """Returns the main charm savings client
+    :return sk_client : charm savings client that can correspond to multiple keysets"""
+    try:
+        cs_client = Client.objects.get(id=4375)
+        return cs_client
+    except Client.DoesNotExist:
+        raise CharmSavingsViewsException("Charm Savings client does not exist, or isnt id:4375")
+    return
+
+
+def get_cs_keyset():
+    """Returns the default charm savings keyset used when no other keyset is available
+    :return cs_keyset : charm savings keyset that corresponds to transactions"""
+    try:
+        cs_keyset = KeySet.objects.using('slave1').get(id=51657)
+        return cs_keyset
+    except KeySet.DoesNotExist:
+        raise CharmSavingsViewsException("Charm Savings keyset does not exist, or isnt id:51657!")
+    return
+
+
+def get_active_client_keysets():
+    """Returns a list of keysets for each of our active clients"""
+    partners = CharmSavingsPartner.objects.all()
+    keysets = []
+    for partner in partners:
+        keysets.append(partner.keyset)
+    return keysets
+
+
+def create_keyset(keyset_description, client=None):
+    """Gets a keyset associated with the keyset_description or
+    creates a new keyset if it doesn't exist
+        :param keyset_description : the toolbarid that maps to a unique toolbar distribution
+        :return keyset : retrieved or created keyset
+    """
+    if client is None:
+        client = get_cs_client()
+
+    if keyset_description is None or keyset_description == "none":
+        return get_cs_keyset()
+    else:
+        keyset = KeySet(client=client, postback_currency_id=1, public_key = sha1(str(random())).hexdigest(), private_key= sha1(str(random())).hexdigest(), last_call_id = 1, revenue_share = '50', description=keyset_description)
+        keyset.save()
+        CS_CJ_PID = '7181377'
+        cj = Broker.objects.get(id=2)
+        cj_identifier = KeySetBrokerIdentifier(keyset=keyset, broker=cj, key="pid", value=CS_CJ_PID, description="cj pid")
+        cj_identifier.save()
+    return keyset
+
+
+def delete_multiple_keysets(keyset_description):
+    """ When there are multiple keysets for a keyset description, all keysets are set to deleted except for one"""
+    keysets = KeySet.objects.filter(description=keyset_description, deleted=False).order_by("id")
+    result_keyset = keysets[0]
+    for keyset in keysets[1:]:
+        keyset.deleted = True
+        keyset.save()
+    return result_keyset
+
+
+def get_request_keyset(keyset_description, platform="standalone"):
+    """Gets a keyset relative to the request
+        :param keyset_description: the description of the keyset we are going to lookup
+        :param platform : the platform the keyset will be created for if there is no keyset
+    :return keyset: created or retireved keyset
+    """
+    client = None
+    if keyset_description is None or keyset_description == "":
+        keyset_description = "charmsavings_application_default"
+    elif "conduit" != platform and not keyset_description.startswith("cs_"):
+        keyset_description = "cs_%s" % (keyset_description)
+    elif "conduit" == platform:
+        client = get_conduit_client()
+
+    memcached_key_for_keyset_by_description = "cs_%s" % (keyset_description)
+    cached_keyset = charmsavings_cache.get(memcached_key_for_keyset_by_description, None)
+    if cached_keyset is None:
+        try:
+            keyset = KeySet.objects.using("slave1").get(description=keyset_description, deleted=False)
+        except KeySet.DoesNotExist:
+            keyset = create_keyset(keyset_description=keyset_description, client=client)
+        except KeySet.MultipleObjectsReturned:
+            keyset = delete_multiple_keysets(keyset_description)
+        cached_keyset = cache_keyset(keyset)
+    else:
+        memcached_key_for_keyset_by_id = "couponbuddy_keyset_%s" % (cached_keyset['id'])
+        cached_keyset_by_id = charmsavings_cache.get(memcached_key_for_keyset_by_id, None)
+        if cached_keyset_by_id is None:
+            keyset = KeySet.objects.using("slave1").get(description=keyset_description, deleted=False)
+            cached_keyset = cache_keyset(keyset)
+    return cached_keyset
+
+
+def build_url(request, path):
+    """
+    Helper function to construct urls
+    Builds urls that work on third party websites
+    Params:
+        request : http request made for the file
+        path : location of the file
+
+      Returns
+        url : correctly formatted url
+    """
+    current_url = request.build_absolute_uri()
+    current_url_parts = list(urlparse(current_url))
+    current_url_parts[4] = ''
+    current_url_parts[2] = path
+    return urlunparse(current_url_parts)
+
+
+def escape_user_id(user_id):
+    """Escapes our user id so we dont get escape characters or unicode in it"""
+    ansi_escape = re.compile(r'([^0-9a-zA-Z\-]*)')
+    user_id = "".join(i for i in user_id if ord(i)<128)
+    user_id = ansi_escape.sub('', user_id)
+    return user_id
+
+
+def check_flagged_user(cached_charmsavings_user):
+    if cached_charmsavings_user is not None and not cached_charmsavings_user['flagged']:
+        recent_ips = 0
+        for stored_ip_address, ip_last_seen in cached_charmsavings_user['ip_addresses'].items():
+            if datetime.now() - ip_last_seen < timedelta(hours=24):
+                recent_ips += 1
+        if recent_ips > 3:
+            CouponBuddyUser.objects.using('couponbuddy_master').filter(id=cached_charmsavings_user['id']).update(flagged=True)
+            couponbuddy_user = CouponBuddyUser.objects.using('couponbuddy_master').get(id=cached_charmsavings_user['id'])
+            couponbuddy_user.cache_user()
+            new_note = CouponBuddyUserNote(coupon_buddy_user_id=cached_charmsavings_user['id'], created_datetime=datetime.now(), note="Too many IPs: %d" % recent_ips)
+            new_note.save()
+
+
+def get_or_create_user_settings(user_id):
+    try:
+        user_settings = CouponBuddyUserSettings.objects.using('couponbuddy_master').get(coupon_buddy_user_id=user_id)
+    except CouponBuddyUserSettings.DoesNotExist:
+        user_settings = CouponBuddyUserSettings(coupon_buddy_user_id=user_id)
+        user_settings.save()
+    return user_settings
+
+
+def get_partner_theme(keyset):
+    context = {}
+    try:
+        theme = CharmSavingsPartnerTheme.objects.get(keyset=keyset)
+    except CharmSavingsPartnerTheme.DoesNotExist:
+        return {}
+    fields = theme._meta.get_all_field_names()
+    for field in fields:
+        field_value = getattr(theme, field, None)
+        if field_value or field_value == False:
+            context[field] = field_value
+    return context
+
+
+def get_default_charmsavings_theme():
+    context = {}
+    #general
+    context['app_name'] = "Charm Savings"
+    context['site_name'] = "CharmSavings.com"
+    context['show_first_use'] = True
+    context['drop_on_hover'] = False
+    context['first_use_website_link_text'] = "www.charmsavings.com"
+    context['first_use_website_link_destination'] = "http://www.charmsavings.com"
+    context['legal_link_destination'] = "http://www.charmsavings.com/legal"
+    context['eula_link_destination'] = "http://www.charmsavings.com/legal"
+
+    #fonts
+    context['font_family'] = "Cambria"
+    context['font_size'] = "14px"
+
+    ##logos
+    context['full_settings_page_logo'] = {'url': '%scharm_savings_app/images/settings_logo.png' % settings.STATIC_URL}
+    context['first_use_header_logo'] = {'url': '%scharm_savings_app/images/firstuse_logo.png' % settings.STATIC_URL}
+    context['small_app_logo'] = {'url': '%scharm_savings_app/images/logo.png' % settings.STATIC_URL}
+    context['small_state_logo'] = {'url': '%scharm_savings_app/images/crown_grn.png' % settings.STATIC_URL}
+    context['deal_bullet_logo'] = {'url': '%scharm_savings_app/images/crown_grey.png' % settings.STATIC_URL}
+    context['deal_bullet_logo_hover'] = {'url': '%scharm_savings_app/images/crown_grn.png' % settings.STATIC_URL}
+
+    #images
+    context['minimize_button_image'] = {'url': '%scharm_savings_app/images/minusTri.png' % settings.STATIC_URL}
+    context['minimize_button_image_hover'] = {'url': '%scharm_savings_app/images/minusTriGreen.png' % settings.STATIC_URL}
+
+    #colors
+    context['background_color'] = "#ffffff"
+    context['small_state_number_of_deals_color'] = "#20c076"
+    context['inner_border_color'] = "#efefef"
+    context['outer_border_color'] = "#cccccc"
+    context['text_color'] = "#666666"
+    context['text_hover_color'] ="#20c076"
+    context['hyperlink_color'] ="#20c076"
+    context['active_button_color'] ="#20c076"
+    context['active_button_border_color'] ="#f1f1f1"
+    context['active_button_text_color'] = "#000000"
+    context['active_button_onclick_color'] = "#219c63"
+    context['inactive_button_color'] ="#dddddd"
+    context['inactive_button_border_color'] ="#f1f1f1"
+    context['inactive_button_text_color'] = "#000000"
+    context['inactive_button_onclick_color'] = "#a9a9a9"
+    return context
+
+################################################################################
+#                       Model Retrieval                                        #
+################################################################################
+
+################################################################################
+#               Loading Static Templates/Javascript                            #
+################################################################################
+def charmsavings_firstuse(request):
+    user_id = request.GET.get('u', None)
+    keyset_description = request.GET.get('v', None)
+    keyset = get_request_keyset(keyset_description)
+    context = {}
+    context['log_user_disable'] = build_url(request, reverse('charmSavingsApplication:log_user_disable'))
+    context['log_user_enable'] = build_url(request, reverse('charmSavingsApplication:log_user_enable'))
+
+    context['user_id'] = user_id
+    context['keyset'] = keyset
+    template_name = 'charm_savings_app/standalone/firstuse.html'
+
+    response = render(request,
+            template_name,
+            context)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    return response
+
+
+@never_cache
+def charmsavings_controlpanel(request, keyset_description='charmsavings_application_default'):
+    user_id = get_charmsavings_user_id(request)
+    keyset_description = request.GET.get('v', keyset_description)
+    keyset = get_request_keyset(keyset_description)
+    context = get_default_charmsavings_theme()
+    context.update(get_cached_charmsavings_partner_theme(keyset))
+    context['charmsavings_enable'] = build_url(request, reverse('charmSavingsApplication:log_user_enable'))
+    context['charmsavings_disable'] = build_url(request, reverse('charmSavingsApplication:log_user_disable'))
+    context['charmsavings_reenable_site'] = build_url(request, reverse('charmSavingsApplication:reenable_site'))
+    context['charmsavings_minimize_view'] = build_url(request, reverse('charmSavingsApplication:log_always_small'))
+    context['charmsavings_normal_view'] = build_url(request, reverse('charmSavingsApplication:log_normal_display'))
+    context['client_keyset_description'] = keyset_description
+    segment_id = 'cs9000'
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+    if cached_user != None:
+        user_settings = manage_user_settings(cached_user['id'])
+        if user_settings is None:
+            user_settings = CouponBuddyUserSettings(coupon_buddy_user_id=cached_user['id'], disabled=False)
+            user_settings.save()
+            user_settings = manage_user_settings(cached_user['id'])
+
+        if user_settings['disabled']:
+            context['disabled'] = "true"
+        else:
+            context['disabled'] = "false"
+        if user_settings['application_display_minimized']:
+            context['minimized'] = "true"
+        else:
+            context['minimized'] = "false"
+        disabled_sites = CouponBuddyUserDisabledSite.objects.filter(user_settings_id=user_settings['id'], deleted=False).values('domain')
+        context['disabled_sites'] = disabled_sites
+
+    context['user_id'] = user_id
+    context['keyset'] = keyset
+
+    template_name = 'charm_savings_app/standalone/user_control_panel.html',
+    response = render(request, template_name, context)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    response.set_cookie('user_id',user_id)
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+def manage_user_settings(user_id):
+    user_setting = get_cached_user_settings(user_id)
+    if user_setting is None:
+        try:
+            user_setting = CouponBuddyUserSettings.objects.using('couponbuddy_master').get(coupon_buddy_user_id=user_id)
+            user_setting = cache_coupon_buddy_user_setting(user_setting)
+        except CouponBuddyUserSettings.DoesNotExist:
+            user_setting = None
+        except CouponBuddyUserSettings.MultipleObjectsReturned:
+            user_settings = CouponBuddyUserSettings.objects.using('couponbuddy_master').filter(coupon_buddy_user_id=user_id).order_by('id')
+            user_setting = user_settings[0]
+            for user_setting in user_settings[1:]:
+                user_setting.delete()
+            user_setting = cache_coupon_buddy_user_setting(user_setting)
+    return user_setting
+
+def google_analytics_html(request):
+    template_name = 'charm_savings_app/standalone/google_analytics.html',
+    response = render(request, template_name)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+def get_charmsavings_user_id(request):
+    keyset_description = request.GET.get('v', None)
+    keyset = get_request_keyset(keyset_description)
+    try:
+        partner = CharmSavingsPartner.objects.get(keyset__id=keyset['id'])
+    except CharmSavingsPartner.DoesNotExist:
+        return None 
+
+    if partner.user_tracking:
+        user_id = request.GET.get('cs_uuid', None)
+    else:
+        user_id = request.GET.get('u', None)
+
+    return user_id
+
+def is_conduit_keyset(keyset_description):
+    if ("conduit" == keyset_description or "cs_conduit" == keyset_description):
+        return True
+    return False
+
+
+def get_override_theme_values(request):
+    override_name = request.GET.get('xride_name', None)
+    override_firstuse_text = request.GET.get('xride_firstuse_text', None)
+    override_firstuse_destination = request.GET.get('xride_firstuse_dest', None)
+    override_legal_destination = request.GET.get('xride_legal_dest', None)
+    override_eula_destination = request.GET.get('xride_eula_dest', None)
+
+    context = {}
+    if override_name:
+        context['app_name'] = override_name
+        context['site_name'] = override_name
+    if override_firstuse_text:
+        context['first_use_website_link_text'] = override_firstuse_text
+    if override_firstuse_destination:
+        context['first_use_website_link_destination'] = override_firstuse_destination
+    if override_legal_destination:
+        context['legal_link_destination'] = override_legal_destination
+    if override_eula_destination:
+        context['eula_link_destination'] = override_eula_destination
+
+    return context
+
+
+@never_cache
+def charmsavings_html(request):
+    """
+    url
+        URL of page charmsavings dropped on and is asking for deals for
+    v
+        Keyset description
+
+    Optional:
+
+    xride_name
+
+        App name that should be used as override 
+
+    xride_firstuse_text
+
+        First use link text that should be used as override 
+
+    xride_firstuse_dest
+
+        First use link destination that should be used as override 
+
+    xride_legal_dest
+
+        Legal page destination that should be used as override 
+
+    xride_eula_dest
+
+        EULA page destination that should be used as override 
+    """
+    url = request.GET.get('url', '')
+    url = url.lower()
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    keyset_description = request.GET.get('v', None)
+    
+    if (url == ''
+        or url == "about:blank" 
+        or ip_address is None 
+        or keyset_description is None):
+        return HttpResponse("", mimetype='text/html')
+
+    conduit = False
+    if is_conduit_keyset(keyset_description):
+        keyset_description = request.GET.get('mamId', None)
+        keyset = get_request_keyset(keyset_description, platform="conduit")
+        user_id = request.GET.get('cUserId', None)
+        if user_id is None:
+            user_id = "TemporaryUserIdOveride-PJ"
+        conduit = True
+    else:
+        keyset = get_request_keyset(keyset_description, platform="standalone")
+        user_id = get_charmsavings_user_id(request)
+
+    if user_id is None:
+        return HttpResponse("", mimetype='text/html')
+
+    context = get_default_charmsavings_theme()
+    context.update(get_cached_charmsavings_partner_theme(keyset))
+    import ipdb;ipdb.set_trace()
+    context.update(get_override_theme_values(request))
+
+    #Get or create a user
+    if "fastsave" == keyset_description:
+        cached_charmsavings_user = {'ip_addresses': [], 'client_id': 4355L, 'segment': u'cs9000', 'id': 134466639L, 'user_id': u'12345678-flamingo', 'country': u'US', 'region': u'04', 'keyset_id': 76896L, 'first_seen_datetime': datetime.now(), 'last_seen_datetime': datetime.now(), 'flagged': True}
+        try:
+            location_info = settings.GEOIP_CITY.region_by_addr(ip_address)
+            cached_charmsavings_user['country'] = location_info["country_code"]
+            cached_charmsavings_user['region'] = location_info["region_name"]
+        except:
+            pass
+    #Get or create a user
+    elif keyset_description in ["cs_speedbit", "cs_shopperpro"] and user_id in ["undefined", "sb"]:
+        user_id = request.GET.get('cs_uuid', None)
+        if user_id == None:
+            return HttpResponse("", mimetype='text/html')
+        cached_charmsavings_user = couponbuddy_user_management(keyset['id'],keyset['client_id'], user_id, "cs9000", ip_address, install_datetime=None, parameters=request.GET)
+    else:
+        cached_charmsavings_user = couponbuddy_user_management(keyset['id'],keyset['client_id'], user_id, "cs9000", ip_address, install_datetime=None, parameters=request.GET)
+    # check_flagged_user(cached_charmsavings_user)
+    if cached_charmsavings_user is not None:
+        user_settings = manage_user_settings(cached_charmsavings_user['id'])
+        if user_settings is None:
+            context['minimized'] = "false"
+            context['new_user'] = "TRUE"
+            context['disabled'] = "false"
+            new_user_settings = CouponBuddyUserSettings(coupon_buddy_user_id=cached_charmsavings_user['id'], disabled=False)
+            new_user_settings.save()
+            user_settings = cache_coupon_buddy_user_setting(new_user_settings)
+        elif user_settings['disabled']:
+            context['new_user'] = "DISABLED"
+            context['disabled'] = "true"
+            if user_settings['application_display_minimized']:
+                context['new_user'] = "MINIMIZE"
+                context['minimized'] = "true"
+        else:
+            context['new_user'] = "FALSE"
+            context['disabled'] = "false"
+            if user_settings['application_display_minimized']:
+                context['new_user'] = "MINIMIZE"
+                context['minimized'] = "true"
+    else:
+        #We may want to return a specific error here to let clients know
+        return HttpResponse("", mimetype='text/html')
+
+    #check to see if current site is blocked for this user
+    current_domain = urlparse(url).hostname
+    bloom_filter = BloomFilter(32 * 200, 8)
+    bloom_filter.buckets = charmsavings_cache.get('%s_disabled_sites' % user_id, None)
+    if bloom_filter.buckets is None:
+        disabled_sites = CouponBuddyUserDisabledSite.objects.filter(user_settings_id=user_settings['id'], deleted=False).values_list('domain', flat=True)
+        #Only writing the cache if there are disabled sites
+        if disabled_sites:
+            cache_user_blacklist(user_settings, user_id)
+        if current_domain in disabled_sites:
+            return HttpResponse("", mimetype='text/html')
+    elif bloom_filter.test(current_domain):
+        disabled_sites = CouponBuddyUserDisabledSite.objects.filter(user_settings_id=user_settings['id'], deleted=False).values_list('domain', flat=True)
+        if current_domain in disabled_sites:
+            return HttpResponse("", mimetype='text/html')
+    request_info = {
+        'url': url,
+        'current_domain': current_domain,
+        'ip_address': ip_address,
+        'keyset_id': keyset['id'],
+    }
+    site_dict = get_appropriate_deals(request_info)
+    #Paranoid check
+    if site_dict is None:
+        return HttpResponse("",mimetype='text/html')
+    if site_dict['deals'] == []:
+        return HttpResponse("",mimetype='text/html')
+
+    toolbar_status = site_dict['toolbar_status']
+
+    whitelisted_widgets = set([])
+    #Check for whitelisted/blacklisted widgets
+    if check_cs_whitelist(keyset['description'], site_dict['widget_id']):
+        whitelisted_widgets.add(site_dict['widget_id'])
+        whitelisted_widgets = list(whitelisted_widgets)
+    elif check_keysetgroup_blacklist(keyset['description'], site_dict['widget_id']):
+        return HttpResponse("",mimetype='text/html')
+
+    #Handle extra parameters to be passed through
+    extra_params = {}
+    extra_params["key"] = keyset['description']
+    extra_params_str = ""
+    for key,val in request.GET.items():
+        if key.lower() == "u":
+            extra_params['uid'] = val.encode('utf-8')
+        elif key.lower() not in ["key", "deal", "widget", "afsrc", "url", "v", "callback"]:
+            extra_params[key.encode('utf-8')] = val.encode('utf-8')
+    if len(extra_params) > 0:
+        extra_params_str = "%s&" % (urlencode(extra_params))
+        site_dict['url'] = "%s&%s" % (site_dict['url'], extra_params_str)
+        site_dict['url'] = site_dict['url'].replace("___KEYSET___", keyset['description'])
+        for deals_dict in site_dict['deals']:
+            deals_dict['url'] = "%s&%s" % (deals_dict['url'], extra_params_str)
+
+    #Organize the deals into types
+    deal_type_dict = {}
+    for deal in site_dict["deals"]:
+        #Replace the tracking url placeholder with the actual keyset description
+        deal['url'] = deal['url'].replace("___KEYSET___", keyset['description'])
+        try:
+            deal_type_dict[deal["deal_type"].replace(" ","")].append(deal)
+        except KeyError:
+            deal_type_dict[deal["deal_type"].replace(" ","")] = [deal]
+
+    context['linkshare_merchant'] = 'false'
+    context['linkshare_height'] = 0 
+    #check for if it's a linkshare merchant
+    if len(site_dict['deals']) > 0:
+        if 'broker' in site_dict['deals'][0]:
+            if site_dict['deals'][0]['broker'] == "LinkShare":
+                context['linkshare_merchant'] = 'true'
+                context['linkshare_deal_text'] = site_dict['text']
+                context['linkshare_deal_url'] =  site_dict['url']
+                context['linkshare_css_height'] = '130px'
+                character_count = len(site_dict['text'])
+                height_of_text = ceil(character_count / 30) * 17 + 130
+                context['linkshare_height'] = height_of_text
+                context['linkshare_css_height'] = "{height}px".format(height=height_of_text)
+
+    #if drop_on_hover is true then the display behaviour of linkshare vs non linkshare merchants is identical
+    if context['drop_on_hover']:
+        context['linkshare_merchant'] = 'false'
+
+    context['conduit'] = conduit
+    context['charmsavings_html'] = build_url(request, reverse('charmSavingsApplication:html'))
+    context['charmsavings_enable'] = build_url(request, reverse('charmSavingsApplication:log_user_enable'))
+    context['charmsavings_disable'] = build_url(request, reverse('charmSavingsApplication:log_user_disable'))
+    context['charmsavings_minimize_view'] = build_url(request, reverse('charmSavingsApplication:log_always_small'))
+    context['charmsavings_normal_view'] = build_url(request, reverse('charmSavingsApplication:log_normal_display'))
+    context["host"] = build_url(request,
+        '%s/%s' % ('charmsavings',get_current_version()))
+
+    context['user_id'] = user_id
+    context['keyset'] = keyset
+    context['keyset_description'] = keyset['description']
+    context['toolbar_status'] = toolbar_status
+    context.update(site_dict)
+    context["types"] = deal_type_dict
+    # change this to whatever local server youre running
+    context["impression_url"] = "http://localhost:5040/impression"
+    if not settings.DEBUG:
+        context["impression_url"] = "http://api.socialingot.com/impression/"
+    # create a comma separated list of deal ids
+    context["deal_ids"] = ','.join(map(lambda deal: str(deal['id']), site_dict["deals"]))
+    #disabling app for current site
+    context['charmsavings_disable_for_site'] = build_url(request, reverse('charmSavingsApplication:disable_site'))
+    context['disable_url'] = url
+    context['debug'] = settings.DEBUG
+    template_name = 'charm_savings_app/standalone/charmsavings.html',
+    response = render(request, template_name, context)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    response.set_cookie('user_id',user_id)
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+def get_appropriate_deals(request_info):
+    '''
+    Get deals for current page using waterfall priority:
+    Bitehunter -> Default
+    Theoretically, these should never overlap.
+    '''
+    url = request_info['url']
+    current_domain = extract_domain(request_info['current_domain'])
+    ip_address = request_info['ip_address']
+    user_country_code = get_user_country_code(ip_address)
+
+    keyset = KeySet.objects.using('slave1').get(id=request_info['keyset_id'])
+
+    toolbar_status = None
+    site_dict = None
+
+    # Bitehunter Deals
+    bitehunter_site_list = get_bitehunter_sites()
+    for site in bitehunter_site_list:
+        if site in current_domain:
+            site_dict = bitehunter_deals(ip_address)
+            if site_dict:
+                return site_dict
+
+    deals = get_deals(keyset,
+                      domain=current_domain,
+                      single_merchant=True,
+                      country_code=user_country_code,
+                      url=url)
+
+    if deals:
+        merchant_id = deals[0].merchant.id
+        site_dict = charmsavings_cache.get('charmsavings_merchant_{0}'.format(merchant_id), None)
+        if not site_dict:
+            site_dict = cache_merchant(deals[0].merchant)
+        site_dict['deals'] = [_deal_to_dict(deal) for deal in deals]
+
+        # Whitelist URL check
+        whitelist = site_dict['merchant_url_root'] not in current_domain
+        site_dict['whitelist_url_bool'] = whitelist
+        site_dict['whitelist_url_str'] = dumps(site_dict['whitelist_url_bool'])
+
+    return site_dict
+
+
+def _deal_to_dict(deal):
+    '''
+    Convert a deal to a dict format charmsavings expects.
+    '''
+    deal_url = deal.charmsavings_tracking_url()
+    offer_text = deal.offer_text
+    deal_info = {
+        'id': deal.id,
+        'title': deal.title,
+        'text': offer_text,
+        'url': deal_url,
+        'deal_type': deal.type.name,
+        'broker': deal.broker.name,
+        'widget_id': deal.merchant.id,
+    }
+    return deal_info
+
+
+def get_user_country_code(ip_address):
+    try:
+        user_country_code = settings.GEOIP_C.country_code_by_addr(ip_address).lower()
+    except:
+        user_country_code = None
+    return user_country_code
+
+
+def charmsavings_settings(request):
+    return render(request, 'charm_savings_app/standalone/charm_savings_settings_page.html')
+
+
+@never_cache
+def charmsavings_js(request, minify=True):
+    """
+    Produce the user space javascript file for the standalone charm savings implementation.
+    """
+    if request is None:
+        return HttpResponse("", mimetype="application/javascript")
+    keyset_description = request.GET.get('v', None)
+    user_id = request.GET.get('u', None)
+    conduit_app_id = request.GET.get('appId', None)
+
+    if keyset_description is None and conduit_app_id is not None:
+        cached_keyset = get_request_keyset('conduit', 'conduit')
+    else:
+        cached_keyset = get_request_keyset(keyset_description, platform="standalone")
+
+    #We cache a rendered template but leave out some fields that are dynamic and insert them here
+    if not settings.DEBUG:
+        settings.SESSION_COOKIE_SECURE = True
+        response_str = charmsavings_cache.get("charmsavings_application_js_%s" % keyset_description,None)
+        if response_str is None:
+            return HttpResponse("",mimetype="application/javascript")
+        response_str = response_str.replace("___SETTINGS_URL___",build_url(request, reverse('charmSavingsApplication:controlpanel_url')))
+        response_str = response_str.replace("___PIXEL_URL___",'http://t.socialgrowthtechnologies.com/t.gif')
+        response_str = response_str.replace("___CSS_URL___",'http://charmsavings.com/static/charm_savings_app/css/charmsavings.css')
+        response_str = response_str.replace("___APPBAR_URL___", build_url(request, reverse('charmSavingsApplication:html')))
+        response_str = response_str.replace("___ANALYTICS_URL___", build_url(request, reverse('charmSavingsApplication:analytics_html')))
+        response_str = response_str.replace("___HOST___", build_url(request, ""))
+        response_str = response_str.replace("___APP_JS___", reverse('charmSavingsApplication:js'))
+        response_str = response_str.replace("___SEEKSKU_URL___",build_url(request, reverse('charmSavingsApplication:seek_sku_js')))
+        response_str = response_str.replace("___SEEKSKU_ENABLED___", dumps(is_valid_seeksku(request, cached_keyset)))
+        response_str = response_str.replace("___SEEKSKU_HOST___", settings.SEEKSKU_HOST)
+        #response_str = response_str.replace("___USER_TRACKING___", "true")
+    else:
+        response_str = create_cacheable_charmsavings_js(minify=False, cached_keyset=cached_keyset)
+        user_space_css_url = build_url(request, '%scharm_savings_app/css/charmsavings.css' % (settings.STATIC_URL))
+        popup_url = build_url(request, reverse('charmSavingsApplication:controlpanel_url'))
+        response_str = response_str.replace("___CSS_URL___",user_space_css_url)
+        response_str = response_str.replace("___SETTINGS_URL___",popup_url)
+        response_str = response_str.replace("___PIXEL_URL___",'%si.gif' % (settings.API_URL_ROOT))
+        response_str = response_str.replace("___APPBAR_URL___", build_url(request, reverse('charmSavingsApplication:html')))
+        response_str = response_str.replace("___ANALYTICS_URL___", build_url(request, reverse('charmSavingsApplication:analytics_html')))
+        response_str = response_str.replace("___HOST___", build_url(request, ""))
+        response_str = response_str.replace("___APP_JS___", reverse('charmSavingsApplication:js'))
+        response_str = response_str.replace("___SEEKSKU_URL___",build_url(request, reverse('charmSavingsApplication:seek_sku_js')))
+        response_str = response_str.replace("___SEEKSKU_ENABLED___", dumps(is_valid_seeksku(request, cached_keyset)))
+        response_str = response_str.replace("___SEEKSKU_HOST___", settings.SEEKSKU_HOST)
+        #response_str = response_str.replace("___USER_TRACKING___", "true")
+
+    response_str = response_str.replace("___USER_ID___",str(user_id))
+    response_str = response_str.replace("___KEYSET_NAME___",cached_keyset['description'])
+    response = HttpResponse(response_str,mimetype="application/javascript")
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    response.set_cookie('user_id',user_id)
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+def injection_pixel(request):
+    return HttpResponse("",mimetype="image/gif")
+
+
+################################################################################
+#                       Stubs / Testing                                        #
+################################################################################
+
+################################################################################
+#                       Postbacks/Callbacks                                    #
+################################################################################
+
+
+################################################################################
+#                       Usage Analytics                                        #
+################################################################################
+@require_http_methods(['GET'])
+def live_debug(request):
+    return HttpResponse("", mimetype='application/javascript')
+
+
+@require_http_methods(['GET'])
+@never_cache
+def log_always_small(request):
+    set_app_preference(request, always_small=True)
+    response = HttpResponse("", mimetype='application/javascript')
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+@require_http_methods(['GET'])
+@never_cache
+def log_normal_display(request):
+    set_app_preference(request, always_small=False)
+    response = HttpResponse("", mimetype='application/javascript')
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+@require_http_methods(['GET'])
+@never_cache
+def log_user_disable(request):
+    toggle_application(request)
+    response = HttpResponse("", mimetype='application/javascript')
+    response.set_cookie('charmsavingsdeclined',1)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+@require_http_methods(['GET'])
+@never_cache
+def log_user_enable(request):
+    toggle_application(request)
+    response = HttpResponse("", mimetype='application/javascript')
+    response.set_cookie('charmsavingsdeclined',0)
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+@require_http_methods(['GET'])
+@never_cache
+def get_user_settings(request):
+    """
+    Lookup the user settings in cache
+    return True or False if user is disabled
+    """
+    user_id = request.GET.get('u', None)
+    if 'HTTP_ORIGIN' in request.META:
+        origin = request.META['HTTP_ORIGIN']
+    else:
+        origin = '*'
+    user_disabled = True
+    if user_id is not None and user_id not in ["undefined", "sb"]:
+        cached_user_settings = get_cached_user_settings(user_id)
+        if cached_user_settings is not None:
+            user_disabled = cached_user_settings['disabled']
+        else:
+            #User settings aren't in cache, check the db
+            keyset_description = request.GET.get('v', None)
+            keyset = get_request_keyset(keyset_description)
+            segment_id = 'cs9000'
+            ip_address = request.META.get('REMOTE_ADDR', None)
+            ip_address = None
+            cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+            if cached_user is not None:
+                try:
+                    user_settings = CouponBuddyUserSettings.objects.get(coupon_buddy_user_id=cached_user['id'])
+                    user_disabled = user_settings.disabled
+                    cache_coupon_buddy_user_setting(user_settings)
+                except CouponBuddyUserSettings.DoesNotExist:
+                    pass
+                except CouponBuddyUserSettings.MultipleObjectsReturned:
+                    pass
+            else:
+                user_disabled = False
+    response = HttpResponse(dumps({'disabled' : user_disabled}), mimetype='application/json')
+    response['Access-Control-Allow-Origin'] = '%s' % origin
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+def string_to_bool(string):
+    if string == "True":
+        return True
+    elif string == "False":
+        return False
+    return string
+
+
+def toggle_application(request):
+    """
+    Turn the user on or off depending on app_disable
+    """
+    always_small = string_to_bool(request.GET.get('size', None))
+    app_disable = string_to_bool(request.GET.get('state', None))
+    site_disable = string_to_bool(request.GET.get('disable_site', None))
+    reenable_site = request.GET.get('d', None)
+    if site_disable:
+        disable_app_for_site(request)
+    elif reenable_site:
+        reenable_site(request)
+    keyset_description = request.GET.get('v', None)
+    user_id = request.GET.get('u', None)
+    keyset = get_request_keyset(keyset_description)
+    segment_id = 'cs9000'
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+    result = None
+    if cached_user is not None:
+        try:
+            user_settings = CouponBuddyUserSettings.objects.get(coupon_buddy_user_id=cached_user['id'])
+            if user_settings.disabled != app_disable:
+                user_settings.disabled = app_disable
+            if user_settings.application_display_minimized != always_small:
+                user_settings.application_display_minimized = always_small
+            user_settings.save()
+            result = cache_coupon_buddy_user_setting(user_settings)
+        except CouponBuddyUserSettings.DoesNotExist:
+            user_settings = CouponBuddyUserSettings(coupon_buddy_user_id=cached_user['id'])
+            if user_settings.disabled != app_disable:
+                user_settings.disabled = app_disable
+            if user_settings.application_display_minimized != always_small:
+                user_settings.application_display_minimized = always_small
+            user_settings.save()
+            result = cache_coupon_buddy_user_setting(user_settings)
+        except CouponBuddyUserSettings.MultipleObjectsReturned:
+            user_settings = CouponBuddyUserSettings.objects.filter(coupon_buddy_user_id=cached_user['id'])
+            if user_settings[0].disabled != app_disable:
+                user_settings[0].disabled = app_disable
+            if user_settings[0].application_display_minimized != always_small:
+                user_settings[0].application_display_minimized = always_small
+            user_settings[0].save()
+            result =cache_coupon_buddy_user_setting(user_settings[0])
+            for user_setting in user_settings[1:]:
+                user_setting.delete()
+    return result
+
+
+def set_app_preference(request, always_small):
+    """
+    Change the user's settings so they'll always be minimized or not. Return
+    a dictionary of the user settings.
+    """
+    keyset_description = request.GET.get('v', None)
+    user_id = request.GET.get('u', None)
+    keyset = get_request_keyset(keyset_description)
+    segment_id = 'cs9000'
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+    result = None
+    if cached_user is not None:
+        try:
+            user_settings = CouponBuddyUserSettings.objects.get(coupon_buddy_user_id=cached_user['id'])
+            user_settings.application_display_minimized = always_small
+            user_settings.save()
+            result = cache_coupon_buddy_user_setting(user_settings)
+        except CouponBuddyUserSettings.DoesNotExist:
+            user_settings = CouponBuddyUserSettings(coupon_buddy_user_id=cached_user['id'])
+            user_settings.application_display_minimized = always_small
+            user_settings.save()
+            result =cache_coupon_buddy_user_setting(user_settings)
+        except CouponBuddyUserSettings.MultipleObjectsReturned:
+            user_settings = CouponBuddyUserSettings.objects.filter(coupon_buddy_user_id=cached_user['id'])
+            user_settings[0].application_display_minimized = always_small
+            user_settings[0].save()
+            result =cache_coupon_buddy_user_setting(user_settings[0])
+            for user_setting in user_settings[1:]:
+                user_setting.delete()
+    return result
+
+
+def disable_app_for_site(request):
+    """
+    Sets the passed in url as disabled for the specified user.
+    """
+    user_id = request.GET.get('u', None)
+    keyset_description = request.GET.get('v', None)
+    keyset = get_request_keyset(keyset_description)
+    segment_id = 'cs9000'
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+    if cached_user is None:
+        return HttpResponse("", mimetype='application/javascript')
+
+    user_settings = manage_user_settings(cached_user['id'])
+    disable_url = request.GET.get('disable_url', None)
+    disable_domain = urlparse(disable_url).hostname
+
+    bloom_filter = BloomFilter(32 * 200, 8)
+    bloom_filter.buckets = charmsavings_cache.get('%s_disabled_sites' % user_id, None)
+    if bloom_filter.buckets is None or bloom_filter.test(disable_domain) == "False":
+        disabled_site = CouponBuddyUserDisabledSite(coupon_buddy_user_id=user_settings['coupon_buddy_user_id'],domain=disable_domain, user_settings_id=user_settings['id'], datetime=datetime.now())
+        disabled_site.save()
+        cache_user_blacklist(user_settings, user_id)
+    else:
+        site = CouponBuddyUserDisabledSite.objects.filter(domain=disable_domain, user_settings_id=user_settings['id'], deleted=False)
+        if len(site) == 0:
+            disabled_site = CouponBuddyUserDisabledSite(coupon_buddy_user_id=user_settings['coupon_buddy_user_id'],domain=disable_domain, user_settings_id=user_settings['id'], datetime=datetime.now())
+            disabled_site.save()
+            cache_user_blacklist(user_settings, user_id)
+
+    response = HttpResponse("", mimetype='application/javascript')
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+def reenable_site(request):
+    user_id = request.GET.get('u', None)
+    keyset_description = request.GET.get('v', None)
+    keyset = get_request_keyset(keyset_description)
+    segment_id = 'cs9000'
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    cached_user = couponbuddy_user_management(keyset['id'], keyset['client_id'], user_id, segment_id, ip_address, install_datetime=None, parameters=request.GET)
+    if cached_user is None:
+        return HttpResponse("", mimetype='application/javascript')
+
+    user_settings = manage_user_settings(cached_user['id'])
+    reenable_site = request.GET.get('d', None)
+    disabled_site = CouponBuddyUserDisabledSite.objects.filter(domain=reenable_site,user_settings_id=user_settings['id'], deleted=False)
+    for site in disabled_site:
+        site.delete()
+    cache_user_blacklist(user_settings, user_id)
+    response = HttpResponse("", mimetype='application/javascript')
+    response['P3P'] = 'CP="IDC DSP COR ADM DEVi TAIi PSA PSD IVAi IVDi CONi HIS OUR IND CNT"'
+    patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+    return response
+
+
+def get_seek_sku_js(request):
+    """
+    Check if we should drop seek sku on the current domain, region and keyset.
+    """
+    context = {
+        'seeksku_host' : settings.SEEKSKU_HOST
+    }
+    return render(request, 'charm_savings_app/standalone/seek_sku.js', context)
+
+
+def valid_seek_sku_region(ip_address):
+    region = settings.GEOIP_CITY.region_by_addr(ip_address)
+    if region['region_name'] in settings.SEEKSKU_REGIONS:
+        return True
+    return False
+
+
+def valid_seek_sku_domain(url):
+    for domain in settings.SEEKSKU_DOMAINS:
+        if domain in url:
+            return True
+    return False
+
+
+def is_valid_seeksku(request, cached_keyset):
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    url = request.META.get('HTTP_REFERER')
+    seek_sku_activated = False
+    master_switch_on = False
+    master_switch = SeekSku.objects.all()
+    if master_switch:
+        master_switch_on = master_switch[0].activated
+        if master_switch_on:
+            partner = CharmSavingsPartner.objects.get(keyset__id=cached_keyset['id'])
+            if partner.seek_sku:
+                if ip_address and url:
+                    if valid_seek_sku_region(ip_address):
+                        if valid_seek_sku_domain(url):
+                            seek_sku_activated = True
+
+    return seek_sku_activated
+
+
+def determine_user(request):
+    if 'HTTP_ORIGIN' in request.META:
+        origin = request.META['HTTP_ORIGIN']
+    else:
+        origin = '*'
+    app_generated_id = request.GET.get('pvuid', None)
+    fingerprint = request.GET.get('fingerprint', None)
+    evercookie = request.GET.get('evercookie', None)
+    ip_address = request.META.get('REMOTE_ADDR', None)
+    keyset_description = request.GET.get('v', None)
+    keyset = get_request_keyset(keyset_description)
+
+    try:
+        charmsavings_partner = CharmSavingsPartner.objects.get(keyset__id=keyset['id'])
+    except CharmSavingsPartner.DoesNotExist:
+        response = HttpResponse('no_csuid')
+        response['Access-Control-Allow-Origin'] = '%s' % origin
+        patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+        return response
+
+    if charmsavings_partner.user_tracking:
+        existing_users = CharmSavingsUser.objects.filter(
+                Q(fingerprint=fingerprint) |
+                Q(evercookie=evercookie) |
+                Q(ip_address=ip_address)).order_by('id')
+        try:
+            fei_user = existing_users.get(fingerprint=fingerprint, evercookie=evercookie, ip_address=ip_address)
+            fei_user.total_matches += 1
+            fei_user.last_seen_datetime = datetime.now()
+            fei_user.app_generated_id = app_generated_id
+            fei_user.save()
+            MatchLogicCode.objects.create(code="FEI", user=fei_user)
+            response = HttpResponse(fei_user.user_id)
+            response['Access-Control-Allow-Origin'] = '%s' % origin
+            patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+            return response
+
+        except CharmSavingsUser.DoesNotExist:
+            "User not found"
+            pass
+
+        fe_user = existing_users.filter(fingerprint=fingerprint, evercookie=evercookie)
+        if fe_user:
+            oldest_user = fe_user[0]
+            oldest_user.total_matches += 1
+            oldest_user.last_seen_datetime = datetime.now()
+            oldest_user.app_generated_id = app_generated_id
+            oldest_user.save()
+            MatchLogicCode.objects.create(code="FE", user=oldest_user)
+            response = HttpResponse(oldest_user.user_id)
+            response['Access-Control-Allow-Origin'] = '%s' % origin
+            patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+            return response
+
+        fi_user = existing_users.filter(fingerprint=fingerprint, ip_address=ip_address)
+        if fi_user:
+            oldest_user = fi_user[0]
+            oldest_user.total_matches += 1
+            oldest_user.last_seen_datetime = datetime.now()
+            oldest_user.app_generated_id = app_generated_id
+            oldest_user.save()
+            MatchLogicCode.objects.create(code="FI", user=oldest_user)
+            response = HttpResponse(oldest_user.user_id)
+            response['Access-Control-Allow-Origin'] = '%s' % origin
+            patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+            return response
+
+        ei_user = existing_users.filter(evercookie=evercookie, ip_address=ip_address)
+        if ei_user:
+            oldest_user = ei_user[0]
+            oldest_user.total_matches += 1
+            oldest_user.last_seen_datetime = datetime.now()
+            oldest_user.app_generated_id = app_generated_id
+            oldest_user.save()
+            MatchLogicCode.objects.create(code="EI", user=oldest_user)
+            response = HttpResponse(oldest_user.user_id)
+            response['Access-Control-Allow-Origin'] = '%s' % origin
+            patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+            return response
+
+        else:
+            user_id = uuid.uuid4().hex
+            new_user = CharmSavingsUser.objects.create(
+                user_id=user_id, 
+                fingerprint=fingerprint, 
+                evercookie=evercookie, 
+                ip_address=ip_address, 
+                last_seen_datetime=datetime.now(), 
+                app_generated_id=app_generated_id, 
+                total_matches=0)
+            MatchLogicCode.objects.create(user=new_user, code='N')
+            response = HttpResponse(new_user.user_id)
+            response['Access-Control-Allow-Origin'] = '%s' % origin
+            patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+            return response
+
+
+    else:
+        app_generated_user = CharmSavingsUser.objects.filter(app_generated_id=app_generated_id).order_by('id')
+        if app_generated_user:
+            user = app_generated_user[0]
+        else:
+            user = CharmSavingsUser.objects.create(
+                    user_id=uuid.uuid4().hex,
+                    app_generated_id=app_generated_id,
+                    fingerprint=fingerprint,
+                    evercookie=evercookie,
+                    ip_address=ip_address,
+                    last_seen_datetime=datetime.now(), total_matches=0)
+        MatchLogicCode.objects.create(user=user, code='NOT')
+        response = HttpResponse(user.app_generated_id)
+        response['Access-Control-Allow-Origin'] = '%s' % origin
+        patch_cache_control(response, no_cache=True, no_store=True, must_revalidate=True)
+        return response

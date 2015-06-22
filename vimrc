@@ -1,265 +1,154 @@
-set nocompatible
+syntax enable " Turn on Syntax highlighting
 
-filetype off
+" auto indenting
+set et
+set sw=4 " shift width is two, yes two
+set softtabstop=4 " two! NOW FOUR!
+"set nosmarttab " fuck tabs!
+"set autoindent " It's easier than doing it myself.
+set smartindent " Don't be stupid about it.
+set expandtab " all tabs are actually spaces
 
-" vundle configuration
-if has("win32")
-    let g:vim_home_path = "~/vimfiles"
-else
-    let g:vim_home_path = "~/.vim"
+" ----------------------------------------------------------------------------
+" UI
+" ----------------------------------------------------------------------------
+set ruler " show me the line,column my cursor is on
+set noshowcmd " Don't display incomplete commands
+set nolazyredraw " If we're going to redraw, lets not be lazy about it.
+syntax sync minlines=1000 " Look for synchronization points 1000 lines before the current position in the file.
+set number " show line numbers
+set wildmenu " Turn on wild menu. Sounds fun.
+set wildmode=longest:list,full " make tab completion act like bash, but even better!
+set ch=2 " Command line height
+set backspace=indent,eol,start " Fixes a problem where I cannot delete text that is existing in the file
+set whichwrap=b,s,h,l,<,>,[,] " Wrap on other things
+set report=0 " Tell us about changes
+set nostartofline " don't jump to the start of a line when scrolling
+" I'm in a goddamn hurry. I want anything up near esc to be esc so I can just mash the keyboard.
+"inoremap <F1> <ESC>
+"nnoremap <F1> <ESC>
+"vnoremap <F1> <ESC>
+" quick <esc> out by hitting kj
+imap kj <ESC>
+" code folding
+set foldmethod=indent
+set foldlevel=99
+
+" ----------------------------------------------------------------------------
+" Visual stoof
+" ----------------------------------------------------------------------------
+set background=dark " We use a dark terminal so we can play nethack
+set mat=5 " show matching brackets for 1/10 of a second
+set laststatus=2 " always have a file status line at the bottom, even when theres only one file
+set novisualbell " Stop flashing at me and trying to give me seizures.
+set virtualedit=block " Allow virtual edit in just block mode.
+
+" ----------------------------------------------------------------------------
+" Searching and replacing
+" ---------------------------------------------------------------------------
+set showmatch " brackets/brace matching
+set incsearch " show me whats matching as I type my search
+set hlsearch " Highlight search results
+set ignorecase " Ignore case while searching
+set smartcase " psych on that whole ignore case while searching thing! This will match case if you use any uppercase characters.
+set gdefault " Always do search and replace globally
+" prepend all searches with \v to get rid of vim's 'crazy default regex characters'
+nnoremap / /\v
+" make tab % in normal mode. This allows us to jump between brackets.
+nnoremap <tab> %
+" make tab % in visual mode. this allows us to jump between brackets.
+vnoremap <tab> %
+" make <space> + character insert a single character in line
+nnoremap <Space> i_<Esc>r
+
+
+" ----------------------------------------------------------------------------
+" Moving around
+" ---------------------------------------------------------------------------
+" disabling the up key in normal mode. LEARN TO USE k
+nnoremap <up> <nop>
+" disabling the down key in normal mode. LEARN TO USE j
+nnoremap <down> <nop>
+" disabling the left key in normal mode. LEARN TO USE h
+nnoremap <left> <nop>
+" disabling the right key in normal mode. LEARN TO USE l
+nnoremap <right> <nop>
+" disabling the up key in normal mode. LEARN TO USE k
+inoremap <up> <nop>
+" disabling the down key in normal mode. LEARN TO USE j
+inoremap <down> <nop>
+" disabling the left key in normal mode. LEARN TO USE h
+inoremap <left> <nop>
+" disabling the right key in normal mode. LEARN TO USE l!!!
+inoremap <right> <nop>
+
+" scroll faster (3 chars at a time) with shift
+nmap <S-k> 3k
+nmap <S-j> 3j
+nmap <S-h> 3h
+nmap <S-l> 3l
+
+" back tab
+nmap <S-Tab> <<
+imap <S-Tab> <Esc><<i
+
+" splitting screens
+nmap vv :vsplit .
+nmap ss :split .
+
+" moving between screens
+nmap <M-h> <C-w>h
+imap <M-h> <C-w>h
+nmap <M-j> <C-w>j
+imap <M-j> <C-w>j
+nmap <M-k> <C-w>k
+imap <M-k> <C-w>k
+nmap <M-l> <C-w>l
+imap <M-l> <C-w>l
+
+" Toggle line numbers to the side of the vim screen
+nmap <C-N><C-N> :set invnumber<CR>
+
+" Lets use all the colors
+set t_Co=256
+let g:CSApprox_attr_map = { 'bold' : 'bold', 'italic' : '', 'sp' : '' }
+colorscheme lucius
+
+" Hack to help map colors
+if &term =~ "xterm"
+    "256 color --
+    let &t_Co=256
+    " restore screen after quitting
+    set t_ti=ESC7ESC[rESC[?47h t_te=ESC[?47lESC8
+    if has("terminfo")
+        let &t_Sf="\ESC[3%p1%dm"
+        let &t_Sb="\ESC[4%p1%dm"
+    else
+        let &t_Sf="\ESC[3%dm"
+        let &t_Sb="\ESC[4%dm"
+    endif
 endif
 
-execute "set rtp+=" . g:vim_home_path . "/bundle/vundle/"
-let g:vundle_default_git_proto = 'https'
-call vundle#rc(g:vim_home_path. "/bundle")
-
-" Bundles to install
-Bundle 'gmarik/vundle'
-
-" Syntax/filetype detection
-Bundle 'saltstack/salt-vim'
-
-" Helpful plugins
-Bundle 'Lokaltog/vim-easymotion'
-Bundle 'Lokaltog/vim-powerline'
-Bundle 'ervandew/supertab'
-Bundle 'jistr/vim-nerdtree-tabs'
-Bundle 'mileszs/ack.vim'
-Bundle 'phleet/vim-mercenary'
-Bundle 'scrooloose/nerdcommenter'
-Bundle 'scrooloose/nerdtree'
-Bundle 'scrooloose/syntastic'
-Bundle 'sjl/gundo.vim'
-Bundle 'tpope/vim-abolish'
-Bundle 'tpope/vim-eunuch'
-Bundle 'tpope/vim-fugitive'
-Bundle 'tpope/vim-repeat'
-Bundle 'tpope/vim-speeddating'
-Bundle 'tpope/vim-surround'
-Bundle 'tpope/vim-endwise'
-Bundle 'walm/jshint.vim'
-Bundle 'aaronbieber/quicktask'
-Bundle 'davidhalter/jedi-vim'
-Bundle 'kchmck/vim-coffee-script'
-Bundle 'xolox/vim-misc'
-Bundle 'xolox/vim-easytags'
-Bundle 'airblade/vim-gitgutter'
-Bundle 'nathanaelkane/vim-indent-guides'
-Bundle 'michaeljsmith/vim-indent-object'
-Bundle 'Rykka/riv.vim'
 
 
-" My vim bundle
+" ---------------------------------------------------------------------------
+" Strip all trailing whitespace in file
+" ---------------------------------------------------------------------------
+function! StripWhitespace ()
+    exec ':%s/ \+$//gc'
+endfunction
+map ,s :call StripWhitespace ()<CR>
 
-filetype plugin indent on
+" first, enable status line always
+set laststatus=2
 
+" now set it up to change the status line based on mode
+"if version >= 700
+"  au InsertEnter * hi StatusLine term=reverse ctermbg=5 gui=undercurl guisp=Magenta
+"  au InsertLeave * hi StatusLine term=reverse ctermfg=0 ctermbg=2 gui=bold,reverse
+"endif
 
-scriptencoding utf-8
-set encoding=utf-8
-
-"------------------------------------------------
-" Color settings
-"------------------------------------------------
-set background=dark
-
-" Basic settings
-highlight Normal                                                         guifg=Green    guibg=Black
-highlight LineNr     cterm=bold ctermfg=gray  ctermbg=NONE      gui=NONE guifg=DarkGrey guibg=NONE
-highlight Folded                ctermfg=59    ctermbg=NONE
-
-" Pmenu for supertab etc
-highlight Pmenu      cterm=NONE ctermfg=green ctermbg=darkgray  gui=NONE guifg=green guibg=darkgray
-highlight PmenuSel   cterm=NONE ctermfg=green ctermbg=black     gui=NONE guifg=green guibg=black
-
-" Better diff colors
-highlight DiffAdd    cterm=bold ctermfg=black ctermbg=darkgreen gui=bold guifg=black guibg=darkgreen
-highlight DiffChange cterm=bold ctermfg=black ctermbg=darkblue
-highlight DiffText   cterm=bold ctermfg=black ctermbg=lightgray
-highlight DiffDelete cterm=bold ctermfg=black ctermbg=darkred
-
-" Underline the cursor line
-highlight CursorLine cterm=underline
-
-" Extra white space
-highlight OverLength      ctermbg=red
-highlight ColorColumn     ctermbg=darkgray
-highlight ExtraWhitespace ctermbg=red guibg=red
-
-
-"------------------------------------------------
-" Basic settings
-"------------------------------------------------
-"let mapleader="'"      " The leader key
-set mouse=a            " Allow mouse
-set nowrap             " No wrapping
-set showmatch          " Show matching brackets when inserted
-set splitbelow         " Default splits to below
-set splitright         " Default vsplits to the right
-set title              " Set title for gvim
-set foldmethod=syntax  " Fold based on syntax
-set foldlevel=999      " Start with folds open
-set t_Co=256           " Force 256 colors
-set scrolloff=999      " Keep cursor at center
-
-" Tab settings
-set expandtab          " Expand tabs into spaces
-set smarttab           " Allow for easy backspace of tabs
-set tabstop=4          " Use 4 spaces for tabs
-set softtabstop=4      " Use 4 spaces for soft tabs
-set shiftwidth=4       " Make shift same as a tab
-
-" Indent settings
-set autoindent
-set nosmartindent
-
-" Search settings
-set hlsearch           " Highlight results
-set incsearch          " Start showing results while typing
-set ignorecase         " Ignore case in searched
-set smartcase          " Use case in search with capitals
-
-" Line number settings
-set number             " Start with absolute numbers at cursor
-set relativenumber     " Start with relative numbers
-set numberwidth=3      " Use 3 columns for numbers
-
-" Cursor / visual settings
-set cursorline         " Show a line for the cursor
-set colorcolumn=       " Unset colorcolumn
-set laststatus=2       " Always show status line
-set showmode           " Show the current mode
-
-" Tab completion settings
-set wildmode=list:longest     " Complete till longest common string
-set wildignore+=.git,.hg,.svn " Ignore version control repos
-set wildignore+=*.pyc         " Ignore python compiled files
-set wildignore+=*.class       " Ignore java compiled files
-set wildignore+=*.swp         " Ignore vim backups
-
-" Backup/Undo settings
-execute "set directory=" . g:vim_home_path . "/swap"
-execute "set backupdir=" . g:vim_home_path . "/backup"
-execute "set undodir=" . g:vim_home_path . "/undo"
-set backup
-set undofile
-set writebackup
-
-
-"------------------------------------------------
-" Plugin settings
-"------------------------------------------------
-
-" SuperTab settings
-let g:SuperTabDefaultCompletionType = "context"
-
-" NerdTree settings
-let g:nerdtree_tabs_open_on_console_startup = 1
-
-" Synstastic settings
-let g:syntastic_python_checkers=['pylint', 'flake8']
-let g:syntastic_python_flake8_args='--config ~/.flake8'
-let g:syntastic_python_pylint_args='--rcfile .pylintrc --msg-template="{path}:{line}: [{msg_id}] {msg}" -r n'
-
-" Gundo settings
-let g:gundo_preview_bottom = 1
-let g:gundo_right = 1
-let g:gundo_help = 0
-let g:gundo_width = 25
-let g:gundo_preview_height = 10
-
-" Eclim settings
-let g:EclimProjectTreeAutoOpen = 0
-let g:EclimProjectTreeSharedInstance = 1
-let g:EclimBrowser = 'xombrero'
-let g:EclimOpenUrlInVimPatterns =
-  \ [
-    \ '\.\(dtd\|xml\|xsd\)$',
-    \ '\.txt$',
-  \ ]
-command -range -nargs=* Google call eclim#web#SearchEngine('http://www.google.com/search?q=<query>', <q-args>, <line1>, <line2>)
-command -nargs=? Dictionary call eclim#web#WordLookup('http://dictionary.reference.com/search?q=<query>', '<args>')
-
-" Indent Guides
-let g:indent_guides_guide_size = 1
-
-"------------------------------------------------
-" Other settings
-"------------------------------------------------
-" Auto save and restore views for these files
-autocmd BufWinLeave *.sh mkview
-autocmd BufWinEnter *.sh silent loadview
-autocmd BufWinLeave *.c mkview
-autocmd BufWinEnter *.c silent loadview
-autocmd BufWinLeave *.h mkview
-autocmd BufWinEnter *.h silent loadview
-autocmd BufWinLeave *.h mkview
-autocmd BufWinEnter *.h silent loadview
-autocmd BufWinLeave *.py mkview
-autocmd BufWinEnter *.py silent loadview
-autocmd BufWinLeave *.java mkview
-autocmd BufWinEnter *.java silent loadview
-autocmd BufWinLeave *.js mkview
-autocmd BufWinEnter *.js silent loadview
-autocmd BufWinLeave *.coffee mkview
-autocmd BufWinEnter *.coffee silent loadview
-autocmd BufWinLeave *.sls mkview
-autocmd BufWinEnter *.sls silent loadview
-autocmd BufWinLeave *.rst mkview
-autocmd BufWinEnter *.rst silent loadview
-
-" Treat all html as htmldjango
-autocmd BufNewFile,BufRead *.html set filetype=htmldjango
-
-" Treat all *.md as markdown
-autocmd BufNewFile,BufRead *.md set filetype=markdown
-
-" Show extra which space and over 80
-match OverLength /\%80v.\+/
-match ExtraWhitespace /\s\+$/
-autocmd BufWinEnter * match ExtraWhitespace /\s\+$/
-autocmd InsertEnter * match ExtraWhitespace /\s\+\%#\@<!$/
-autocmd InsertLeave * match ExtraWhitespace /\s\+$/
-autocmd BufWinLeave * call clearmatches()
-
-" Fun with numbers
-autocmd FocusLost * :set norelativenumber
-autocmd FocusGained * :set relativenumber
-autocmd InsertEnter * :set norelativenumber
-autocmd InsertLeave * :set relativenumber
-function! NumberToggle()
-    if(&relativenumber == 1)
-        set number
-        set norelativenumber
-    else
-        set relativenumber
-    endif
-endfunc
-
-" Short cuts for split nav
-map <C-j> <C-w>j
-map <C-k> <C-w>k
-map <C-h> <C-w>h
-map <C-l> <C-w>l
-
-" Easier visual indent
-vnoremap < <gv
-vnoremap > >gv
-
-" Command to write as root if forgot to open with sudo
-cmap w!! %!sudo tee > /dev/null %
-
-" Key bindings
-noremap <silent><leader>/ :nohlsearch<Bar>:echo<CR>
-nnoremap <F2> :call NumberToggle()<cr>
-map <F3> :set wrap! wrap?<CR>
-map <F4> :set hlsearch! hlsearch?<CR>
-map <F5> :edit <CR>
-map <F6> :edit! <CR>
-nmap <F12> :NERDTreeTabsToggle <CR>
-nmap <F7> :GundoToggle <CR>
-map <F8> :set expandtab! expandtab?<CR>
-map <F9> :set paste! paste?<CR>
-map <F10> :set cursorline! cursorline?<CR>
-map <F11> :set spell! spell?<CR>
-nnoremap <silent> <Space> @=(foldlevel('.')?'za':"\<Space>")<CR>
-imap kj <ESC>
+autocmd InsertEnter * set cursorline 
+autocmd InsertLeave * set nocursorline 
+:highlight CursorLine ctermbg=DarkGrey
+:nmap <C-N><C-N> :set invnumber<CR>

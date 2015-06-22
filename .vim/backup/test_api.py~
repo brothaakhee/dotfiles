@@ -1,0 +1,213 @@
+from monetization.apps.keysets.models import KeySet, Client, KeySetBrokerIdentifier
+from monetization.apps.charmSavingsApplication.tests import CharmSavingsTestCase
+from monetization.apps.charmSavingsApplication.views import get_cs_client, get_cs_keyset, create_keyset, charmsavings_html, get_request_keyset
+from monetization.apps.charmSavingsApplication.cache import charmsavings_widget_list, get_cached_charmsavings_partner_theme, populate_widget_cache
+from monetization.apps.deals.cache import cache_deals_by_domain
+from monetization.apps.charmSavingsApplication.models import CharmSavingsPartnerTheme, CharmSavingsPartner
+from monetization.apps.widgets.models import Widget
+from monetization.apps.deals.models import DealStatus, DistributionChannel, Deal
+from monetization.apps.widgets.models import ToolbarStatus
+from monetization.apps.country.models import Country
+from monetization.apps.keysetgroups.models import KeySetGroup, CharmSavingsWhitelist
+from monetization.apps.keysetgroups.cache import cache_keysetgroups, check_keysetgroup_blacklist, cache_cs_whitelist, check_cs_whitelist
+from django.core.urlresolvers import reverse
+from django.shortcuts import render_to_response
+from django_dynamic_fixture import G
+from datetime import datetime, timedelta
+from unittest import skip
+from django.test.client import Client as DjangoClient
+from mock import patch
+from django.core import cache
+
+
+class TestGets(CharmSavingsTestCase):
+    """When we make requests for specific resources they should return that resource"""
+
+
+    def test_get_cs_client(self):
+        """When we get a client for Charm Savings, it should always return a Client instance"""
+        cs_client = get_cs_client()
+        if type(cs_client) != Client:
+            self.fail("Expected Client for get_cs_client but got %s" % type(cs_client))
+
+    def test_get_cs_keyset(self):
+        """When we get a keyset for Charm Savings, it should always return a KeySet instance"""
+        cs_keyset = get_cs_keyset()
+        if type(cs_keyset) != KeySet:
+            self.fail("Expected KeySet for get_cs_keyset but got %s" % type(cs_keyset))
+
+    @skip('Test fails due to some issue with previous test suite')
+    def smoke_test(self):
+        """When we make a request to every single CharmSavingsApplication URL it should succeed"""
+        urls = [
+            reverse('charmSavingsApplication:log_user_enable'),
+            reverse('charmSavingsApplication:html'),
+            reverse('charmSavingsApplication:js'),
+            reverse('charmSavingsApplication:controlpanel_url'),
+            #We reverse only 1 since we populate from the CharmSavingsPartner its a good test for them all
+            reverse('charmSavingsWebsite:cs_akno_b_settings'),
+        ]
+        for url in urls:
+            response = self.client.get(url)
+            assert(response.status_code == 200)
+
+    def test_create_keyset(self):
+        """When we need to create a new client keyset, we should make sure the cj broker identifier is correct"""
+        new_keyset = create_keyset("charmsavingstest")
+        cj_identifier = KeySetBrokerIdentifier.objects.get(keyset=new_keyset)
+        assert(cj_identifier.value == "7181377")
+
+    def test_charmsavings_widget_list_for_blacklist(self):
+        """
+        When we get widgets for charmsavings, we should not get the ones that have
+        been blacklisted through keysetgroup
+        """
+        toolbar_status = ToolbarStatus.objects.all()[0]
+        merchant = G(Widget, title="TestTitle", toolbar_status=toolbar_status)
+        live_deal_status = DealStatus.objects.all()[0]
+        usa_country = G(Country, id=1, name="United States", code="US")
+        toolbar_channel = DistributionChannel.objects.get(name="Toolbar")
+        test_keyset = G(KeySet, description="charmsavingstest")
+        deal = G(Deal, status=live_deal_status, deleted=False,start_datetime=datetime.now(),end_datetime=datetime.now()+timedelta(days=1))
+        deal.merchant = merchant
+        deal.countries = [usa_country,]
+        deal.distribution_channel = [toolbar_channel,]
+        deal.save()
+        cs_widgets = charmsavings_widget_list()
+        self.assertEqual(cs_widgets[0], merchant)
+
+        keysetgroup = G(KeySetGroup, name="test keysetgroup")
+        keysetgroup.blacklisted_widgets = [merchant,]
+        keysetgroup.keysets = [test_keyset,]
+        keysetgroup.save()
+        cache_keysetgroups()
+        assert(check_keysetgroup_blacklist(test_keyset.description, merchant.id))
+
+    def test_charmsavings_whitelist(self):
+        """
+        When we get widgets for charmsavings, we should not get the ones that have
+        been blacklisted through keysetgroup
+        """
+        toolbar_status = ToolbarStatus.objects.all()[0]
+        merchant = G(Widget, title="TestTitle", toolbar_status=toolbar_status)
+        live_deal_status = DealStatus.objects.all()[0]
+        usa_country = G(Country, id=1, name="United States", code="US")
+        toolbar_channel = DistributionChannel.objects.get(name="Toolbar")
+        test_keyset = G(KeySet, description="charmsavingstest")
+        deal = G(Deal, status=live_deal_status, deleted=False,start_datetime=datetime.now(),end_datetime=datetime.now()+timedelta(days=1))
+        deal.merchant = merchant
+        deal.countries = [usa_country,]
+        deal.distribution_channel = [toolbar_channel,]
+        deal.save()
+        cs_widgets = charmsavings_widget_list()
+        self.assertEqual(cs_widgets[0], merchant)
+
+        whitelist = G(CharmSavingsWhitelist, name="test keysetgroup")
+        whitelist.whitelisted_widgets = [merchant,]
+        whitelist.keysets = [test_keyset,]
+        whitelist.save()
+        cache_cs_whitelist()
+        assert(check_cs_whitelist(test_keyset.description, merchant.id))
+
+    def test_charmsavings_drop_on_hover_functionality(self):
+        """
+        When we have a charmsavings theme with drop_on_hover enabled, then trigger app dropdown on mouseenter instead of mouse click.
+        """
+        hover_keyset = G(KeySet, description="cs_hovertest")
+        hover_theme = G(CharmSavingsPartnerTheme, keyset=hover_keyset, drop_on_hover=False)
+        keyset = get_request_keyset('hovertest')
+        theme = get_cached_charmsavings_partner_theme(keyset)
+        self.assertFalse(theme['drop_on_hover'])
+
+        template_name = 'charm_savings_app/standalone/charmsavings.html',
+        response = render_to_response(template_name, theme)
+        
+        self.assertTrue(response.content)
+        self.assertFalse('id="smallAppHover"' in response.content)
+        self.assertFalse('id="mediumAppHover"' in response.content)
+
+        hover_theme.drop_on_hover = True
+        hover_theme.save()
+        theme = get_cached_charmsavings_partner_theme(keyset)
+        self.assertEqual(theme['drop_on_hover'], True)
+
+        template_name = 'charm_savings_app/standalone/charmsavings.html',
+        response = render_to_response(template_name, theme)
+        
+        self.assertTrue(response.content)
+        self.assertTrue('id="smallAppHover"' in response.content)
+        self.assertTrue('id="mediumAppHover"' in response.content)
+
+    def test_charmsavings_theme_override(self):
+        """
+        When we receive charmsavings override parameters through GET
+        they should replace/override the default values in the theme
+        as well as any theme specific values
+        """
+
+        widget = G(Widget, title="Best Buy", direct_url="bestbuy.com")
+        distribution_channel = DistributionChannel.objects.get(name="Toolbar")
+        live_deal_status = DealStatus.objects.get(name="Live")
+        deal = G(Deal, merchant=widget, distribution_channel=[distribution_channel], status=live_deal_status, deleted=False, start_datetime= datetime.min, end_datetime=datetime.max)
+        override_keyset = G(KeySet, description="cs_override")
+        partner = G(CharmSavingsPartner, keyset=override_keyset)
+        populate_widget_cache([widget])
+        cache_deals_by_domain()
+        override_theme = G(CharmSavingsPartnerTheme, 
+                           keyset=override_keyset, 
+                           app_name="DefaultXYZ App", 
+                           site_name="DefaultXYZ App", 
+                           first_use_website_link_text="http://google12.com", 
+                           first_use_website_link_destination="http://gmail12.com",
+                           legal_link_destination="http://google12.com",
+                           eula_link_destination="http://google12.com")
+
+        keyset = get_request_keyset('override')
+        theme = get_cached_charmsavings_partner_theme(keyset)
+        self.assertEqual(theme['app_name'], "DefaultXYZ App")
+        self.assertEqual(theme['site_name'], "DefaultXYZ App")
+        self.assertEqual(theme['first_use_website_link_text'], "http://google12.com")
+        self.assertEqual(theme['first_use_website_link_destination'], "http://gmail12.com")
+        self.assertEqual(theme['legal_link_destination'], "http://google12.com")
+        self.assertEqual(theme['eula_link_destination'], "http://google12.com")
+
+
+        client = DjangoClient()
+        charmsavings_html_url = reverse('charmSavingsApplication:html')
+        get_parameters = {
+            'v' : 'override',
+            'url' : 'http://www.bestbuy.com',
+            'u': 'id123'
+        }
+        response = client.get(charmsavings_html_url, get_parameters)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, "")
+
+
+        self.assertTrue(response.content)
+        self.assertTrue("http://google12.com" in response.content)
+        self.assertTrue("http://gmail12.com" in response.content)
+        self.assertTrue("DefaultXYZ App" in response.content)
+
+        get_parameters = {
+            'v' : 'override',
+            'url' : 'http://www.bestbuy.com',
+            'u': 'id123',
+            'xride_name': 'TotallyNewApp',
+            'xride_firstuse_text': 'http://totallynewapp.com',
+            'xride_firstuse_dest': 'http://totallynewappdestination.com',
+            'xride_legal_dest': 'http://legalstuff.com',
+            'xride_eula_dest': 'http://eulastuff.com',
+        }
+
+        response = client.get(charmsavings_html_url, get_parameters)
+        self.assertTrue(response.content)
+        self.assertFalse("http://google12.com" in response.content)
+        self.assertFalse("http://gmail12.com" in response.content)
+        self.assertFalse("DefaultXYZ App" in response.content)
+
+        self.assertTrue("http://totallynewapp.com" in response.content)
+        self.assertTrue("http://totallynewappdestination.com" in response.content)
+        self.assertTrue("TotallyNewApp" in response.content)
+        self.assertTrue("http://legalstuff.com" in response.content)
+        self.assertTrue("http://eulastuff.com" in response.content)
