@@ -1,8 +1,8 @@
 [user]
-    name = Hammad Hai 
-    email = shakirsahab@gmail.com
+    name = Hammad Hai
+    email = hammad.a.hai@gmail.com
 [github]
-    user = brothaakhee 
+    user = brothaAkhee
 [core]
     editor = vim
     excludesfile = ~/.gitignore_global
@@ -44,3 +44,5 @@
     uncommit = reset --soft 'HEAD^'
 [push]
     default = current
+[apply]
+    whitespace = nowarn

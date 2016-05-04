@@ -109,10 +109,18 @@ imap <M-l> <C-w>l
 " Toggle line numbers to the side of the vim screen
 nmap <C-N><C-N> :set invnumber<CR>
 
+source ~/pep8.vim
+
 " Lets use all the colors
 set t_Co=256
 let g:CSApprox_attr_map = { 'bold' : 'bold', 'italic' : '', 'sp' : '' }
 colorscheme lucius
+
+" Pep8 80 line column mark
+highlight ColorColumn ctermbg=237
+set colorcolumn=80
+"let &colorcolumn=join(range(81,999),",")
+"let &colorcolumn="80,".join(range(120,999),",")
 
 " Hack to help map colors
 if &term =~ "xterm"
@@ -152,3 +160,4 @@ autocmd InsertEnter * set cursorline
 autocmd InsertLeave * set nocursorline 
 :highlight CursorLine ctermbg=DarkGrey
 :nmap <C-N><C-N> :set invnumber<CR>
+
