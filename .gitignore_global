@@ -1,0 +1,9 @@
+*.py[ocd]
+*.pyenv
+*.swp
+*.orig
+*.tox
+*.local
+.DS_Store
+local_settings_*.py
+settings_local.py
