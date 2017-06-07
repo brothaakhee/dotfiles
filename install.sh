@@ -108,7 +108,7 @@ if [[ ! -d "$HOME/.vim/bundle/vundle" ]]; then
         echo "Would install vundle"
     else
         echo "Installing vundle"
-        git clone https://github.com/gmarik/vundle.git "$HOME/.vim/bundle/vundle" &> /dev/null
+        git clone https://github.com/VundleVim/Vundle.vim.git "$HOME/.vim/bundle/Vundle.vim" &> /dev/null
         if [[ $bundleupdate -eq 0 ]]; then
             echo "Now start vim and run:"
             echo ":BundleInstall"

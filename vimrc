@@ -1,3 +1,79 @@
+set nocompatible
+filetype off
+
+set rtp+=~/.vim/bundle/Vundle.vim
+let g:vundle_default_git_proto = 'https'
+call vundle#begin()
+
+" Plugins to install
+Plugin 'VundleVim/Vundle.vim'
+
+Plugin 'kien/ctrlp.vim'
+Plugin 'tpope/vim-fugitive'
+Plugin 'walm/jshint.vim'
+Plugin 'Valloric/YouCompleteMe'
+Plugin 'Valloric/MatchTagAlways'
+Plugin 'ervandew/supertab'
+Plugin 'scrooloose/nerdtree'
+
+" Helpful plugins
+"Plugin 'Lokaltog/vim-easymotion'
+"Plugin 'vim-airline/vim-airline'
+"Plugin 'vim-airline/vim-airline-themes'
+"Plugin 'ervandew/supertab'
+"Plugin 'jistr/vim-nerdtree-tabs'
+"Plugin 'kien/ctrlp.vim'
+"Plugin 'mileszs/ack.vim'
+"Plugin 'phleet/vim-mercenary'
+"Plugin 'scrooloose/nerdcommenter'
+"Plugin 'scrooloose/syntastic'
+"Plugin 'sjl/gundo.vim'
+"Plugin 'tpope/vim-abolish'
+"Plugin 'tpope/vim-eunuch'
+"Plugin 'tpope/vim-fugitive'
+"Plugin 'gregsexton/gitv'
+"Plugin 'tpope/vim-repeat'
+"Plugin 'tpope/vim-speeddating'
+"Plugin 'tpope/vim-surround'
+"Plugin 'tpope/vim-endwise'
+"Plugin 'walm/jshint.vim'
+"Plugin 'aaronbieber/quicktask'
+"Plugin 'davidhalter/jedi-vim'
+"Plugin 'kchmck/vim-coffee-script'
+"Plugin 'xolox/vim-misc'
+"Plugin 'xolox/vim-easytags'
+"Plugin 'airblade/vim-gitgutter'
+"Plugin 'nathanaelkane/vim-indent-guides'
+"Plugin 'michaeljsmith/vim-indent-object'
+"Plugin 'Valloric/YouCompleteMe'
+"Plugin 'majutsushi/tagbar'
+"Plugin 'b4b4r07/vim-hcl'
+"Plugin 'fatih/vim-go'
+"Plugin 'heavenshell/vim-pydocstring'
+"Plugin 'SirVer/ultisnips'
+"Plugin 'honza/vim-snippets'
+
+" Tim's vim bundle
+Plugin 'shadowfax-chc/vim-fax'
+
+call vundle#end()
+
+filetype plugin indent on
+
+" Load everything else from vim-fax/vimrc.vim
+if filereadable(expand("~/.vim/bundle/vim-fax/vimrc.vim"))
+    execute "source ~/.vim/bundle/vim-fax/vimrc.vim"
+endif
+
+" NerdTree settings
+autocmd vimenter * NERDTree
+map <C-n> :NERDTreeToggle<CR>
+autocmd bufenter * if (winnr("$") == 1 && exists("b:NERDTree") && b:NERDTree.isTabTree()) | q | endif
+" i want to use my shift up and shift down
+let g:NERDTreeMapJumpFirstChild = ''
+let g:NERDTreeMapJumpLastChild = ''
+
+
 syntax enable " Turn on Syntax highlighting
 
 " auto indenting
@@ -106,9 +182,6 @@ imap <M-k> <C-w>k
 nmap <M-l> <C-w>l
 imap <M-l> <C-w>l
 
-" Toggle line numbers to the side of the vim screen
-nmap <C-N><C-N> :set invnumber<CR>
-
 source ~/pep8.vim
 
 " Lets use all the colors
@@ -159,5 +232,3 @@ set laststatus=2
 autocmd InsertEnter * set cursorline 
 autocmd InsertLeave * set nocursorline 
 :highlight CursorLine ctermbg=DarkGrey
-:nmap <C-N><C-N> :set invnumber<CR>
-

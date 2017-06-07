@@ -93,7 +93,7 @@ alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
 
-alias fetchpull='git fetch && git pull'
+alias fp='git fetch && git pull'
 
 # Add an "alert" alias for long running commands.  Use like so:
 #   sleep 10; alert
@@ -111,6 +111,13 @@ fi
 if [ -f ~/.bash_profile ]; then
     . ~/.bash_profile
 fi
+
+if [ -f /usr/local/share/gitprompt.sh ]; then
+    GIT_PROMPT_THEME=Default
+    . /usr/local/share/gitprompt.sh
+fi
+
+eval "$(hub alias -s)"
 
 # enable programmable completion features (you don't need to enable
 # this, if it's already enabled in /etc/bash.bashrc and /etc/profile
@@ -153,6 +160,13 @@ function ve() {
 
 function rmpyc() {
     find . -name "*.pyc" -exec rm -rf {} \;
+}
+
+docker-cleanup () 
+{ 
+    docker rm -v $(docker ps -a -q -f status=exited);
+    docker rmi $(docker images -f "dangling=true" -q);
+    docker volume rm $(docker volume ls -qf dangling=true)
 }
 
 #export WORKON_HOME=$HOME/projects/Envs
